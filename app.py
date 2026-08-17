@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 class JaxAI:
     def __init__(self):
         self.name = "Джекс"
-        self.version = "1"
+        self.version = "1.01"
         
         api_key = self.get_api_key()
         
@@ -40,7 +40,6 @@ class JaxAI:
             "биография", "факты", "информация"
         ]
         
-        # Слова-маты которые НЕ являются 18+
         self.swear_words = [
             "нахуй", "на хуй", "похуй", "по хуй", "ебать", "бля", "блять",
             "сука", "пиздец", "хуйня", "херня", "охуел", "офигел",
@@ -145,6 +144,7 @@ class JaxAI:
             response = requests.get(url, timeout=5)
             data = response.json()
             
+            # ИСПРАВЛЕНО: правильный путь к данным
             current = data["current_condition"][0]
             temp = current["temp_C"]
             desc = current["lang_ru"][0]["value"]
@@ -182,28 +182,21 @@ class JaxAI:
             return "Не удалось получить новости"
     
     def is_just_swearing(self, text):
-        """Проверка - это просто мат или 18+"""
         text_lower = text.lower()
-        
-        # Проверяем наличие матов
         has_swear = any(word in text_lower for word in self.swear_words)
         
-        # Проверяем наличие 18+ слов
         explicit_words = ["секс", "порно", "член", "пизда", "минет", "куни", "эротика"]
         has_explicit = any(word in text_lower for word in explicit_words)
         
-        # Если есть мат но нет 18+ - это просто ругательство
         if has_swear and not has_explicit:
             return True
         
         return False
     
     def check_inappropriate(self, text):
-        """Проверка на 18+ контент"""
         if not self.client:
             return False
         
-        # Если это просто мат - не блокируем
         if self.is_just_swearing(text):
             return False
         
@@ -235,46 +228,58 @@ class JaxAI:
             return False
     
     def validate_images(self, images):
-        if images is None or len(images) == 0:
+        if images is None:
+            return True, ""
+        
+        if not isinstance(images, list):
+            return False, "Некорректные данные фото!"
+        
+        if len(images) == 0:
             return True, ""
         
         if len(images) > 10:
             return False, "Максимум 10 фото!"
+        
+        for img in images:
+            if not isinstance(img, str) or len(img) > 10 * 1024 * 1024:
+                return False, "Фото слишком большое!"
         
         return True, ""
     
     def extract_city(self, text):
         text_lower = text.lower()
         
-        # Разные формы
         if " в " in text_lower:
             parts = text_lower.split(" в ", 1)
             if len(parts) > 1:
                 words = parts[1].split()
                 if words:
                     city = words[0].rstrip("?,.!")
-                    # Убираем окончания
-                    city = city.replace("е", "").replace("у", "").replace("а", "")
+                    # ИСПРАВЛЕНО: не удаляем буквы, просто возвращаем как есть
                     return city
         
         return None
     
     def should_search(self, text):
+        if not text or not text.strip():
+            return False
         text_lower = text.lower()
         return any(trigger in text_lower for trigger in self.search_triggers)
     
     def generate_response(self, user_input, images=None):
-        if not user_input and not images:
-            return "Напиши что-нибудь!"
+        # ИСПРАВЛЕНО: проверка на пробелы
+        if not user_input or not user_input.strip():
+            if not images:
+                return "Напиши что-нибудь!"
         
         valid, error = self.validate_images(images)
         if not valid:
             return error
         
-        if self.check_inappropriate(user_input):
+        if self.check_inappropriate(user_input or ""):
             return "Извини, но я не могу обсуждать эту тему."
         
-        user_lower = user_input.lower()
+        user_lower = (user_input or "").lower()
         
         if images and len(images) > 0:
             return f"📸 Получил {len(images)} фото. Анализ скоро будет!"
@@ -287,7 +292,7 @@ class JaxAI:
             return self.get_news()
         
         internet_results = None
-        if self.should_search(user_input):
+        if self.should_search(user_input or ""):
             internet_results = self.search_internet(user_input)
         
         if self.client and self.model:
@@ -305,8 +310,10 @@ class JaxAI:
                 messages = [{"role": "system", "content": system_content}]
                 
                 for entry in self.current_chat_history[-5:]:
-                    messages.append({"role": "user", "content": entry["user"]})
-                    messages.append({"role": "assistant", "content": entry["response"]})
+                    # ИСПРАВЛЕНО: пропускаем пустые сообщения
+                    if entry.get("user") and entry.get("response"):
+                        messages.append({"role": "user", "content": entry["user"]})
+                        messages.append({"role": "assistant", "content": entry["response"]})
                 
                 messages.append({"role": "user", "content": user_input})
                 
@@ -389,7 +396,7 @@ HTML_TEMPLATE = """
         <div class="profile-section">
             <div class="profile-avatar">🤖</div>
             <h3>Джекс</h3>
-            <p style="color: #888; font-size: 14px;">ИИ Ассистент v1</p>
+            <p style="color: #888; font-size: 14px;">ИИ Ассистент v1.01</p>
         </div>
         
         <div class="separator"></div>
@@ -428,10 +435,12 @@ HTML_TEMPLATE = """
     <script>
         let images = [];
         let touchStartX = 0;
+        let touchStartY = 0;
         
         document.getElementById('fileInput').onchange = function(e) {
             for(let file of e.target.files) {
                 if(images.length >= 10) { alert('Максимум 10 фото!'); break; }
+                if(file.size > 10 * 1024 * 1024) { alert('Фото слишком большое!'); continue; }
                 const reader = new FileReader();
                 reader.onload = function(ev) {
                     images.push(ev.target.result);
@@ -491,11 +500,15 @@ HTML_TEMPLATE = """
             input.value = '';
             chat.scrollTop = chat.scrollHeight;
             
+            const sentImages = [...images];
+            images = [];
+            updatePreview();
+            
             try {
                 const res = await fetch('/ask', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({text: text, images: images})
+                    body: JSON.stringify({text: text, images: sentImages})
                 });
                 const data = await res.json();
                 chat.innerHTML += '<div class="msg ai">' + escapeHtml(data.reply) + '</div>';
@@ -503,18 +516,21 @@ HTML_TEMPLATE = """
                 chat.innerHTML += '<div class="msg ai">Ошибка</div>';
             }
             
-            images = [];
-            updatePreview();
             chat.scrollTop = chat.scrollHeight;
         }
         
         document.addEventListener('touchstart', function(e) {
             touchStartX = e.touches[0].clientX;
+            touchStartY = e.touches[0].clientY;
         });
         
         document.addEventListener('touchend', function(e) {
             const touchEndX = e.changedTouches[0].clientX;
-            if(touchEndX - touchStartX > 80 && touchStartX < 50) {
+            const touchEndY = e.changedTouches[0].clientY;
+            const diffX = touchEndX - touchStartX;
+            const diffY = touchEndY - touchStartY;
+            
+            if(Math.abs(diffX) > Math.abs(diffY) && diffX > 80 && touchStartX < 50) {
                 toggleMenu();
             }
         });
@@ -536,6 +552,10 @@ def ask():
         
         user_message = data.get('text', '')[:1000]
         images = data.get('images', [])
+        
+        # ИСПРАВЛЕНО: проверка типа images
+        if not isinstance(images, list):
+            images = []
         
         ai_reply = jax.generate_response(user_message, images)
         return jsonify({'reply': ai_reply})
