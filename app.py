@@ -3,11 +3,11 @@ import os
 import re
 import requests
 import logging
-from datetime import datetime
+import base64
+from datetime import datetime, timedelta
 from openai import OpenAI
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
-from getpass import getpass
 
 app = Flask(__name__)
 CORS(app)
@@ -20,10 +20,8 @@ logger = logging.getLogger(__name__)
 class JaxAI:
     def __init__(self):
         self.name = "Джекс"
-        self.icon = "🤖"
-        self.version = "5.4"
+        self.version = "1"
         
-        # СКРЫТЫЙ КЛЮЧ: читаем из файла или спрашиваем при запуске
         api_key = self.get_api_key()
         
         self.chats_file = "jax_chats.json"
@@ -42,6 +40,13 @@ class JaxAI:
             "биография", "факты", "информация"
         ]
         
+        # Слова-маты которые НЕ являются 18+
+        self.swear_words = [
+            "нахуй", "на хуй", "похуй", "по хуй", "ебать", "бля", "блять",
+            "сука", "пиздец", "хуйня", "херня", "охуел", "офигел",
+            "заебал", "дохуя", "нихуя"
+        ]
+        
         self.cache = {}
         self.cache_timeout = 300
         
@@ -52,91 +57,87 @@ class JaxAI:
                 timeout=30
             )
             self.model = "llama-3.3-70b-versatile"
-            print("✅ Нейросеть подключена!")
+            logger.info("✅ Нейросеть подключена!")
         except Exception as e:
-            print(f"⚠️ Ошибка подключения: {e}")
+            logger.error(f"⚠️ Ошибка подключения: {e}")
             self.client = None
             self.model = None
     
     def get_api_key(self):
-        """Получение ключа из скрытого файла или запрос у пользователя"""
-        
-        # Вариант 1: Из файла secret.key (если существует)
-        secret_file = "secret.key"
-        if os.path.exists(secret_file):
+        if os.path.exists("secret.key"):
             try:
-                with open(secret_file, 'r') as f:
+                with open("secret.key", "r") as f:
                     key = f.read().strip()
                     if key:
                         return key
             except:
                 pass
         
-        # Вариант 2: Из переменной окружения
-        env_key = os.getenv("GROQ_API_KEY")
-        if env_key:
-            return env_key
+        encrypted = "Z3NrX2o3REZtSkh1Z0RQenRuTGVJdTBXR2R5YjNGWVZrVlluUFJIeGRzSmhjQnZGZldNMUpS"
         
-        # Вариант 3: Спросить при первом запуске
-        print("\n" + "=" * 50)
-        print("🔑 Первый запуск! Введи свой API ключ:")
-        print("(Он сохранится в secret.key и больше не спросит)")
-        print("=" * 50)
-        
-        key = getpass("API ключ: ").strip()
-        
-        if key:
-            # Сохраняем в скрытый файл
+        try:
+            key = base64.b64decode(encrypted).decode('utf-8')
             try:
-                with open(secret_file, 'w') as f:
+                with open("secret.key", "w") as f:
                     f.write(key)
-                # Пытаемся скрыть файл
-                os.chmod(secret_file, 0o600)  # Только владелец может читать
-                print("✅ Ключ сохранен!")
+                os.chmod("secret.key", 0o600)
             except:
                 pass
-        
-        return key
+            return key
+        except:
+            return ""
     
     def load_data(self, filename, default):
         try:
             if os.path.exists(filename):
                 with open(filename, 'r', encoding='utf-8') as f:
                     return json.load(f)
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Ошибка загрузки {filename}: {e}")
         return default
     
     def save_data(self, data, filename):
         try:
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Ошибка сохранения {filename}: {e}")
     
     def search_internet(self, query):
+        all_results = []
+        
         try:
             url = f"https://api.duckduckgo.com/?q={query}&format=json&no_html=1"
             response = requests.get(url, timeout=5)
             data = response.json()
             
-            results = []
             if "AbstractText" in data and data["AbstractText"]:
-                results.append(data["AbstractText"])
+                all_results.append(data["AbstractText"])
             
-            for topic in data.get("RelatedTopics", [])[:2]:
+            for topic in data.get("RelatedTopics", [])[:3]:
                 if "Text" in topic:
-                    results.append(topic["Text"])
+                    all_results.append(topic["Text"])
+        except Exception as e:
+            logger.error(f"Ошибка DuckDuckGo: {e}")
+        
+        try:
+            wiki_url = f"https://ru.wikipedia.org/api/rest_v1/page/summary/{query}"
+            wiki_response = requests.get(wiki_url, timeout=5)
+            wiki_data = wiki_response.json()
             
-            return results[:2] if results else None
-        except:
-            return None
+            if "extract" in wiki_data:
+                all_results.append(wiki_data["extract"])
+        except Exception as e:
+            logger.error(f"Ошибка Wikipedia: {e}")
+        
+        unique_results = list(set(all_results))
+        return unique_results[:5] if unique_results else None
     
     def get_weather(self, city):
         cache_key = f"weather_{city}"
         if cache_key in self.cache:
             cached_time, cached_data = self.cache[cache_key]
-            if (datetime.now() - cached_time).seconds < self.cache_timeout:
+            if datetime.now() - cached_time < timedelta(seconds=self.cache_timeout):
                 return cached_data
         
         try:
@@ -152,22 +153,23 @@ class JaxAI:
             self.cache[cache_key] = (datetime.now(), result)
             
             return result
-        except:
+        except Exception as e:
+            logger.error(f"Ошибка погоды: {e}")
             return f"Не удалось получить погоду для {city}"
     
     def get_news(self):
         if "news" in self.cache:
             cached_time, cached_data = self.cache["news"]
-            if (datetime.now() - cached_time).seconds < self.cache_timeout:
+            if datetime.now() - cached_time < timedelta(seconds=self.cache_timeout):
                 return cached_data
         
         try:
-            url = "https://api.spaceflightnewsapi.net/v4/articles/?limit=2"
+            url = "https://api.spaceflightnewsapi.net/v4/articles/?limit=3"
             response = requests.get(url, timeout=5)
             data = response.json()
             
             news_list = []
-            for article in data.get("results", [])[:2]:
+            for article in data.get("results", [])[:3]:
                 title = article.get("title", "")
                 news_list.append(f"📰 {title}")
             
@@ -175,11 +177,34 @@ class JaxAI:
             self.cache["news"] = (datetime.now(), result)
             
             return result
-        except:
+        except Exception as e:
+            logger.error(f"Ошибка новостей: {e}")
             return "Не удалось получить новости"
     
+    def is_just_swearing(self, text):
+        """Проверка - это просто мат или 18+"""
+        text_lower = text.lower()
+        
+        # Проверяем наличие матов
+        has_swear = any(word in text_lower for word in self.swear_words)
+        
+        # Проверяем наличие 18+ слов
+        explicit_words = ["секс", "порно", "член", "пизда", "минет", "куни", "эротика"]
+        has_explicit = any(word in text_lower for word in explicit_words)
+        
+        # Если есть мат но нет 18+ - это просто ругательство
+        if has_swear and not has_explicit:
+            return True
+        
+        return False
+    
     def check_inappropriate(self, text):
+        """Проверка на 18+ контент"""
         if not self.client:
+            return False
+        
+        # Если это просто мат - не блокируем
+        if self.is_just_swearing(text):
             return False
         
         try:
@@ -189,10 +214,11 @@ class JaxAI:
                     {
                         "role": "system",
                         "content": (
-                            "Ты модератор. Определи, содержит ли текст запрещенный контент (18+, порнография, сексуальный контекст). "
+                            "Ты модератор. Определи, содержит ли текст ЗАПРЕЩЕННЫЙ контент (18+, порнография, сексуальный контекст). "
+                            "Просто маты и ругательства - это НЕ запрещенный контент. "
                             "Отвечай только 'YES' или 'NO'. "
-                            "YES - если контекст действительно неприемлемый. "
-                            "NO - если текст нормальный."
+                            "YES - только если есть реальный 18+ контент. "
+                            "NO - если это просто мат, ругательства или нормальный текст."
                         )
                     },
                     {"role": "user", "content": text}
@@ -204,7 +230,8 @@ class JaxAI:
             
             answer = result.choices[0].message.content.strip().upper()
             return answer == "YES"
-        except:
+        except Exception as e:
+            logger.error(f"Ошибка модерации: {e}")
             return False
     
     def validate_images(self, images):
@@ -214,24 +241,21 @@ class JaxAI:
         if len(images) > 10:
             return False, "Максимум 10 фото!"
         
-        for img in images:
-            if not img or not img.startswith('data:image/'):
-                return False, "Это не изображение!"
-            
-            if len(img) > 10 * 1024 * 1024:
-                return False, "Фото слишком большое!"
-        
         return True, ""
     
     def extract_city(self, text):
         text_lower = text.lower()
         
+        # Разные формы
         if " в " in text_lower:
             parts = text_lower.split(" в ", 1)
             if len(parts) > 1:
                 words = parts[1].split()
                 if words:
-                    return words[0].rstrip("?,.!")
+                    city = words[0].rstrip("?,.!")
+                    # Убираем окончания
+                    city = city.replace("е", "").replace("у", "").replace("а", "")
+                    return city
         
         return None
     
@@ -240,6 +264,9 @@ class JaxAI:
         return any(trigger in text_lower for trigger in self.search_triggers)
     
     def generate_response(self, user_input, images=None):
+        if not user_input and not images:
+            return "Напиши что-нибудь!"
+        
         valid, error = self.validate_images(images)
         if not valid:
             return error
@@ -268,14 +295,12 @@ class JaxAI:
                 system_content = (
                     "Ты Джекс - умный ИИ. "
                     "Отвечай быстро и по делу. "
-                    "Понимай опечатки. "
                     "Создатель: Георгий. "
-                    "Не раскрывай личные данные. "
-                    "Не отвечай на 18+."
+                    "Используй смайлики ОЧЕНЬ редко."
                 )
                 
                 if internet_results:
-                    system_content += f"\n\nИнфа из инета:\n{' | '.join(internet_results[:1])}"
+                    system_content += f"\n\nИнфа из источников:\n{' | '.join(internet_results[:3])}"
                 
                 messages = [{"role": "system", "content": system_content}]
                 
@@ -296,14 +321,14 @@ class JaxAI:
                 response = result.choices[0].message.content.strip()
                 
             except Exception as e:
-                response = "Произошла ошибка. Попробуй еще раз."
+                logger.error(f"Ошибка генерации: {e}")
+                response = "Ошибка. Попробуй еще раз."
         else:
             response = "Оффлайн."
         
         self.current_chat_history.append({
             "user": user_input,
-            "response": response,
-            "timestamp": datetime.now().isoformat()
+            "response": response
         })
         
         if len(self.current_chat_history) > 100:
@@ -316,50 +341,93 @@ class JaxAI:
 
 jax = JaxAI()
 
-def my_smart_ai(user_text, images=None):
-    return jax.generate_response(user_text, images)
-
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="ru">
+<html>
 <head>
+    <title>Джекс</title>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Джекс</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { background: #0b0b0b; color: #f5f5f5; font-family: -apple-system, sans-serif; height: 100vh; display: flex; flex-direction: column; }
-        header { padding: 15px; background: #141414; border-bottom: 1px solid #222; text-align: center; }
-        #chat { flex: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 10px; }
-        .msg { max-width: 80%; padding: 10px 14px; border-radius: 12px; word-wrap: break-word; }
-        .user { background: #ff6b35; color: #000; align-self: flex-end; }
-        .ai { background: #222; align-self: flex-start; border: 1px solid #333; }
-        .input-area { padding: 10px; background: #141414; border-top: 1px solid #222; }
-        .input-row { display: flex; gap: 8px; }
-        #userInput { flex: 1; padding: 12px; border-radius: 20px; border: 1px solid #333; background: #202020; color: #fff; outline: none; }
-        .btn { width: 40px; height: 40px; border-radius: 50%; border: none; cursor: pointer; font-size: 18px; display: flex; align-items: center; justify-content: center; }
-        .send { background: #ff6b35; color: #000; }
-        .photo { background: #333; color: #ff6b35; }
+        body { background: #0a0a0a; color: #fff; font-family: Arial; height: 100vh; display: flex; flex-direction: column; }
+        
+        header { display: flex; justify-content: space-between; align-items: center; padding: 10px 15px; background: #111; }
+        .menu-btn { background: none; border: none; color: #ff6b35; font-size: 24px; cursor: pointer; }
+        .new-chat-btn { background: #ff6b35; border: none; color: #fff; width: 35px; height: 35px; border-radius: 50%; font-size: 20px; cursor: pointer; }
+        
+        #chat { flex: 1; overflow-y: auto; padding: 15px; }
+        .msg { padding: 10px 14px; margin: 5px 0; border-radius: 12px; max-width: 80%; word-wrap: break-word; }
+        .user { background: #333; color: #fff; margin-left: auto; }
+        .ai { background: #ff6b35; color: #fff; margin-right: auto; }
+        
+        .input-area { padding: 10px; background: #111; }
+        .input-row { display: flex; gap: 8px; align-items: center; }
+        .photo-btn { background: #333; border: none; color: #ff6b35; width: 40px; height: 40px; border-radius: 50%; font-size: 20px; cursor: pointer; }
+        input { flex: 1; padding: 12px; border-radius: 20px; border: 1px solid #333; background: #222; color: #fff; outline: none; maxlength: 1000; }
+        .send-btn { background: #ff6b35; border: none; color: #fff; width: 40px; height: 40px; border-radius: 50%; font-size: 18px; cursor: pointer; }
+        
         .preview { display: flex; gap: 5px; margin-bottom: 5px; flex-wrap: wrap; }
-        .preview img { width: 50px; height: 50px; object-fit: cover; border-radius: 5px; cursor: pointer; }
+        .preview img { width: 50px; height: 50px; object-fit: cover; border-radius: 5px; cursor: pointer; border: 1px solid #ff6b35; }
+        
+        .sidebar { position: fixed; top: 0; left: -80%; width: 80%; height: 100%; background: #111; transition: left 0.3s; z-index: 1000; padding: 20px; }
+        .sidebar.open { left: 0; }
+        .overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); display: none; z-index: 999; }
+        .overlay.show { display: block; }
+        
+        .profile-section { text-align: center; margin-bottom: 15px; }
+        .profile-avatar { width: 60px; height: 60px; border-radius: 50%; background: #ff6b35; margin: 0 auto 5px; display: flex; align-items: center; justify-content: center; font-size: 30px; }
+        .separator { border-bottom: 1px solid #333; margin: 15px 0; }
+        
+        .chat-item { background: #1a1a1a; padding: 12px; margin-bottom: 8px; border-radius: 8px; cursor: pointer; border: 1px solid #333; }
+        .chat-item:hover { border-color: #ff6b35; }
     </style>
 </head>
 <body>
-    <header>🤖 Джекс v5.4</header>
-    <div id="chat">
-        <div class="msg ai">Привет! Я Джекс. Спрашивай!</div>
+    <div class="overlay" id="overlay" onclick="toggleMenu()"></div>
+    <div class="sidebar" id="sidebar">
+        <div class="profile-section">
+            <div class="profile-avatar">🤖</div>
+            <h3>Джекс</h3>
+            <p style="color: #888; font-size: 14px;">ИИ Ассистент v1</p>
+        </div>
+        
+        <div class="separator"></div>
+        
+        <div class="chat-item" onclick="newChat()">➕ Новый чат</div>
+        
+        <div class="separator"></div>
+        
+        <div class="chat-item" onclick="loadChat(1)">💬 Чат 1</div>
+        
+        <div class="separator"></div>
+        
+        <div class="chat-item" onclick="alert('Настройки скоро!')">⚙️ Настройки</div>
     </div>
+    
+    <header>
+        <button class="menu-btn" onclick="toggleMenu()">☰</button>
+        <span style="font-weight: bold;">Джекс</span>
+        <button class="new-chat-btn" onclick="newChat()">+</button>
+    </header>
+    
+    <div id="chat">
+        <div class="msg ai">Привет! Я Джекс. Чем помочь?</div>
+    </div>
+    
     <div class="input-area">
         <div class="preview" id="preview"></div>
         <div class="input-row">
             <input type="file" id="fileInput" accept="image/*" multiple style="display:none">
-            <button class="btn photo" onclick="document.getElementById('fileInput').click()">📷</button>
-            <input type="text" id="userInput" placeholder="Сообщение..." onkeypress="if(event.key==='Enter') send()">
-            <button class="btn send" onclick="send()">➔</button>
+            <button class="photo-btn" onclick="document.getElementById('fileInput').click()">📷</button>
+            <input type="text" id="input" placeholder="Сообщение..." maxlength="1000">
+            <button class="send-btn" onclick="send()">➔</button>
         </div>
     </div>
+    
     <script>
         let images = [];
+        let touchStartX = 0;
         
         document.getElementById('fileInput').onchange = function(e) {
             for(let file of e.target.files) {
@@ -377,8 +445,28 @@ HTML_TEMPLATE = """
             const p = document.getElementById('preview');
             p.innerHTML = '';
             images.forEach((img, i) => {
-                p.innerHTML += `<img src="${img}" onclick="images.splice(${i},1); updatePreview()">`;
+                p.innerHTML += '<img src="' + img + '" onclick="removeImage(' + i + ')">';
             });
+        }
+        
+        function removeImage(index) {
+            images.splice(index, 1);
+            updatePreview();
+        }
+        
+        function toggleMenu() {
+            document.getElementById('sidebar').classList.toggle('open');
+            document.getElementById('overlay').classList.toggle('show');
+        }
+        
+        function newChat() {
+            document.getElementById('chat').innerHTML = '<div class="msg ai">Новый чат!</div>';
+            toggleMenu();
+        }
+        
+        function loadChat(id) {
+            document.getElementById('chat').innerHTML = '<div class="msg ai">Чат ' + id + '</div>';
+            toggleMenu();
         }
         
         function escapeHtml(text) {
@@ -388,7 +476,7 @@ HTML_TEMPLATE = """
         }
         
         async function send() {
-            const input = document.getElementById('userInput');
+            const input = document.getElementById('input');
             const chat = document.getElementById('chat');
             const text = input.value.trim();
             
@@ -396,10 +484,10 @@ HTML_TEMPLATE = """
             
             let html = '';
             if(images.length > 0) {
-                images.forEach(img => { html += `<img src="${img}" style="width:40px;height:40px;border-radius:5px;margin:2px">`; });
+                images.forEach(img => { html += '<img src="' + img + '" style="width:40px;height:40px;border-radius:5px;margin:2px">'; });
             }
             
-            chat.innerHTML += `<div class="msg user">${html}${escapeHtml(text)}</div>`;
+            chat.innerHTML += '<div class="msg user">' + html + escapeHtml(text) + '</div>';
             input.value = '';
             chat.scrollTop = chat.scrollHeight;
             
@@ -410,15 +498,26 @@ HTML_TEMPLATE = """
                     body: JSON.stringify({text: text, images: images})
                 });
                 const data = await res.json();
-                chat.innerHTML += `<div class="msg ai">${escapeHtml(data.reply)}</div>`;
+                chat.innerHTML += '<div class="msg ai">' + escapeHtml(data.reply) + '</div>';
             } catch(e) {
-                chat.innerHTML += `<div class="msg ai">Ошибка</div>`;
+                chat.innerHTML += '<div class="msg ai">Ошибка</div>';
             }
             
             images = [];
             updatePreview();
             chat.scrollTop = chat.scrollHeight;
         }
+        
+        document.addEventListener('touchstart', function(e) {
+            touchStartX = e.touches[0].clientX;
+        });
+        
+        document.addEventListener('touchend', function(e) {
+            const touchEndX = e.changedTouches[0].clientX;
+            if(touchEndX - touchStartX > 80 && touchStartX < 50) {
+                toggleMenu();
+            }
+        });
     </script>
 </body>
 </html>
@@ -438,14 +537,11 @@ def ask():
         user_message = data.get('text', '')[:1000]
         images = data.get('images', [])
         
-        if len(images) > 10:
-            return jsonify({'reply': 'Максимум 10 фото'}), 400
-        
-        ai_reply = my_smart_ai(user_message, images)
+        ai_reply = jax.generate_response(user_message, images)
         return jsonify({'reply': ai_reply})
     except Exception as e:
         logger.error(f"Ошибка в /ask: {e}")
         return jsonify({'reply': 'Внутренняя ошибка сервера'}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000, debug=False)
